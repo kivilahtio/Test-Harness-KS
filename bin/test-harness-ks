@@ -1,3 +1,5 @@
+#!/usr/bin/env perl
+
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 
@@ -46,34 +48,38 @@ my $usage = <<USAGE;
 
 Runs a ton of tests with other metrics if needed
 
-  -h --help             This friendly help!
+  -h --help       This friendly help!
 
-  -v --verbose          String, one of the Log::Log4perl log levels, OFF, FATAL, ERROR, WARN, INFO, DEBUG, TRACE, ALL
+  -v --verbose    String, one of the Log::Log4perl log levels:
+                  OFF, FATAL, ERROR, WARN, INFO, DEBUG, TRACE, ALL
 
-  --tar                 Create a testResults.tar.gz from all tests and deliverables
+  --tar           Create a testResults.tar.gz from all tests and deliverables
 
-  --dry-run             Don't run tests or other metrics. Simply show what would happen.
+  --dry-run       Don't run tests or other metrics. Simply show what would
+                  happen.
 
-  --results-dir         Where to gather test deliverables and archive. Defaults to the current dir
+  --results-dir   Where to gather test deliverables and archive.
+                  Defaults to the current dir
 
-  --cover               Run Devel::Cover and output Clover- and HTML-reports
+  --cover         Run Devel::Cover and output Clover- and HTML-reports
 
-  --junit               Run test using TAP::Harness::Junit instead of TAP::Harness and output junit xml-files
-                        under --results-dir
+  --junit         Run test using TAP::Harness::Junit instead of TAP::Harness
+                  and output junit xml-files under --results-dir
 
-  -l --lib              Extra include directories to pass to the test harness.
-                        Same as perl -Ilib
-                        Can be repeated.
+  -l --lib        Extra include directories to pass to the test harness.
+                  Same as perl -Ilib
+                  Can be repeated.
 
-  -a --all              Test all .t-files withing subdirectories under directory ./t/.
-                        Use with --unit to include test files in ./t/*.t as well.
+  -a --all        Test all .t-files withing subdirectories under directory ./t/
+                  Use with --unit to include test files in ./t/*.t as well.
 
-  -u --unit             Unit tests in ./t/*.t
+  -u --unit       Unit tests in ./t/*.t
 
-  -x --xt               XT tests in ./xt/*.t
+  -x --xt         XT tests in ./xt/*.t
 
-  -f --files            Path, list of test files to test. Used to add files that don't belong to the preset test groups.
-                        Repeatable.
+  -f --files      Path, list of test files to test. Used to add files that
+                  don't belong to the preset test groups.
+                  Repeatable.
 
 EXAMPLE
 
@@ -86,7 +92,7 @@ EXAMPLE
     ## If you are interested in unit tests and xt tests only...
     test-harness-ks --unit --xt -v ERROR -l lib -l t/lib
 
-    ## Run some other test files alltogether, use a subshell to include more tests
+    ## Run other test files alltogether, use a subshell to include more tests
     test-harness-ks -f some/other/dir/00-load.t -f '`ls some/other/dir/t/*.t`'
 
 USAGE
