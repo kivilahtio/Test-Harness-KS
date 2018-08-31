@@ -14,28 +14,32 @@ use Getopt::Long qw(:config no_ignore_case);
 use Try::Tiny;
 use Scalar::Util qw(blessed);
 
+use Log::Log4perl qw(get_logger);
+use Log::Log4perl::Level;
+
 use Test::Harness::KS;
 
 my ($help, $dryRun);
-my ($verbose) = (0);
-my ($clover, $junit, $tar, $resultsDir);
-my ($testAll, $testUnit, $testXt, $testDb);
+my ($verbose) = ('WARN');
+my ($cover, $junit, $tar, $resultsDir);
+my ($testAll, $testUnit, $testXt);
+my @otherTestFiles;
 my @includes;
 
 
 GetOptions(
     'h|help'                      => \$help,
-    'v|verbose:i'                 => \$verbose,
+    'v|verbose:s'                 => \$verbose,
     'dry-run'                     => \$dryRun,
     'results-dir=s'               => \$resultsDir,
-    'clover'                      => \$clover,
+    'cover'                       => \$cover,
     'junit'                       => \$junit,
     'tar'                         => \$tar,
     'l|lib:s'                     => \@includes,
     'a|all'                       => \$testAll,
     'u|unit'                      => \$testUnit,
     'x|xt'                        => \$testXt,
-    'd|db'                        => \$testDb,
+    'f|files:s'                   => \@otherTestFiles,
 );
 
 my $usage = <<USAGE;
@@ -44,7 +48,7 @@ Runs a ton of tests with other metrics if needed
 
   -h --help             This friendly help!
 
-  -v --verbose          Integer, the level of verbosity
+  -v --verbose          String, one of the Log::Log4perl log levels, OFF, FATAL, ERROR, WARN, INFO, DEBUG, TRACE, ALL
 
   --tar                 Create a testResults.tar.gz from all tests and deliverables
 
@@ -52,7 +56,7 @@ Runs a ton of tests with other metrics if needed
 
   --results-dir         Where to gather test deliverables and archive. Defaults to the current dir
 
-  --clover              Run Devel::Cover and output Clover-reports
+  --cover               Run Devel::Cover and output Clover- and HTML-reports
 
   --junit               Run test using TAP::Harness::Junit instead of TAP::Harness and output junit xml-files
                         under --results-dir
@@ -61,23 +65,29 @@ Runs a ton of tests with other metrics if needed
                         Same as perl -Ilib
                         Can be repeated.
 
-  -a --all              Run all tests.
+  -a --all              Test all .t-files withing subdirectories under directory ./t/.
+                        Use with --unit to include test files in ./t/*.t as well.
 
-  -u --unit             Unit tests t/*.t
+  -u --unit             Unit tests in ./t/*.t
 
-  -x --xt               XT tests
+  -x --xt               XT tests in ./xt/*.t
 
-  -d --db               db_dependent tests
+  -f --files            Path, list of test files to test. Used to add files that don't belong to the preset test groups.
+                        Repeatable.
 
 EXAMPLE
 
-    ##First run unit test suite and archive the test deliverables
-    example.pl --unit --tar
-    ##Then run a big test suite, with code coverage metrics
-    example.pl --all --tar --clover
+    ## First run unit test suite and archive the test deliverables
+    test-harness-ks --unit --tar
 
-    ##If you are interested in unit tests and db tests only...
-    example.pl --unit --db -v 1 -l lib -l t/lib
+    ## Then run a big test suite, with code coverage metrics
+    test-harness-ks --all --tar --cover
+
+    ## If you are interested in unit tests and xt tests only...
+    test-harness-ks --unit --xt -v ERROR -l lib -l t/lib
+
+    ## Run some other test files alltogether, use a subshell to include more tests
+    test-harness-ks -f some/other/dir/00-load.t -f '`ls some/other/dir/t/*.t`'
 
 USAGE
 
@@ -86,44 +96,36 @@ if ($help) {
     exit 0;
 }
 
+Log::Log4perl->easy_init( Log::Log4perl::Level::to_priority( $verbose ) );
+
 run();
 sub run {
     my (@tests, $tests);
-    push(@tests, @{_getAllTests()})         if $testAll;
-    push(@tests, @{_getUnitTests()})        if $testUnit;
-    push(@tests, @{_getXTTests()})          if $testXt;
-    push(@tests, @{_getDbDependentTests()}) if $testDb;
+    push(@tests, @{_getAllTests()})  if $testAll;
+    push(@tests, @{_getUnitTests()}) if $testUnit;
+    push(@tests, @{_getXTTests()})   if $testXt;
+    push(@tests, @{Test::Harness::KS::parseOtherTests(\@otherTestFiles)}) if @otherTestFiles;
 
-    print "Selected the following test files:\n".join("\n",@tests)."\n" if $verbose;
+    get_logger->info("Selected the following test files:\n".join("\n",@tests)) if $verbose;
 
     my $ksTestHarness = Test::Harness::KS->new(
         resultsDir => $resultsDir,
         tar        => $tar,
-        clover     => $clover,
+        cover      => $cover,
         junit      => $junit,
         testFiles  => \@tests,
         dryRun     => $dryRun,
-        verbose    => $verbose,
     );
     $ksTestHarness->run();
 }
 
 sub _getAllTests {
-    return _getTests('t/t', '*.t');
+    return Test::Harness::KS::findFiles('t/*/', '*.t');
 }
 sub _getUnitTests {
-    return 't/t/01-unit.t';
+    return Test::Harness::KS::findFiles('t/', '*.t', 1);
 }
 sub _getXTTests {
-    return 't/t/xt/02-xt.t';
+    return Test::Harness::KS::findFiles('xt/', '*.t');
 }
-sub _getDbDependentTests {
-    return 't/t/integration/03-integration.t';
-}
-sub _getTests {
-    my ($dir, $selector, $maxDepth) = @_;
-    $maxDepth = 999 unless(defined($maxDepth));
-    my $files = `/usr/bin/find $dir -maxdepth $maxDepth -name '$selector'`;
-    my @files = split(/\n/, $files);
-    return \@files;
-}
+

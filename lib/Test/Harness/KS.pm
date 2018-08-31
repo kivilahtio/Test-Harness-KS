@@ -10,47 +10,63 @@ Test::Harness::KS
 
 =SYNOPSIS
 
-Runs given test files and generates clover and junit test reports to the given directory.
+Runs given test files and generates clover, html and junit test reports to the given directory.
 
 Automatically sorts given test files by directory and deduplicates them.
+
+See
+  test-harness-ks --help
+for commandline usage
 
 =cut
 
 ##Pragmas
 use Modern::Perl;
-use Carp;
+use Carp::Always;
 use autodie;
-$Carp::Verbose = 'true'; #die with stack trace
 use English; #Use verbose alternatives for perl's strange $0 and $\ etc.
 use Try::Tiny;
 use Scalar::Util qw(blessed);
 use Cwd;
 
 ##Testing harness libraries
-use TAP::Harness::JUnit;
-use Devel::Cover; #Require coverage testing and extensions for it. These are not actually used in this package directly, but Dist::Zilla uses this data to autogenerate the dependencies
-  use Devel::Cover::Report::Clover;
-  use Template;
-  use Perl::Tidy;
-  use Pod::Coverage::CountParents;
-  use Test::Differences;
+sub loadJUnit() {
+  require TAP::Harness::JUnit;
+}
+sub loadCover() {
+  require Devel::Cover; #Require coverage testing and extensions for it. These are not actually used in this package directly, but Dist::Zilla uses this data to autogenerate the dependencies
+  require Devel::Cover::Report::Clover;
+  require Template;
+  require Perl::Tidy;
+  require Pod::Coverage::CountParents;
+  require Test::Differences;
+}
+
 
 ##Remote modules
 use IPC::Cmd;
 use File::Basename;
 use File::Path qw(make_path);
 use Params::Validate qw(:all);
+use Data::Dumper;
+use Storable;
+
+use Log::Log4perl qw(get_logger);
+use Log::Log4perl::Level;
 
 =head2 new
 
-@PARAMS HashRef: {
+Creates a new Test runner
+
+Configure log verbosity by initializing Log::Log4perl beforehand, otherwise the internal logging defaults to WARN
+
+ @params HashRef: {
           resultsDir => String, directory, must be writable. Where the test deliverables are brought
           tar        => Boolean
-          clover     => Boolean
+          cover      => Boolean
           junit      => Boolean
           testFiles  => ARRAYRef, list of files to test
           dryRun     => Boolean
-          verbose    => Integer
           lib        => ARRAYRef or undef, list of extra include directories for the test files
         }
 
@@ -84,10 +100,9 @@ my $validationNew = {
     },
   },
   tar => {default => 0},
-  clover => {default => 0},
+  cover  => {default => 0},
   junit  => {default => 0},
   dryRun => {default => 0},
-  verbose => {default => 0},
   lib     => {
     default => [],
     callbacks => {
@@ -114,16 +129,23 @@ my $validationNew = {
   dbSocket => {default => undef},
   dbDiffIgnoreTables => {default => undef}
 };
+
+use fields qw(resultsDir tar cover junit dryRun lib testFiles testFilesByDir dbDiff dbUser dbPass dbHost dbPort dbDatabase dbSocket dbDiffIgnoreTables);
+
 sub new {
-#  $validationTestFilesCallbacks->{$_}(['/tmp']) for (keys(%$validationTestFilesCallbacks));
+  unless (Log::Log4perl->initialized()) { Log::Log4perl->easy_init( Log::Log4perl::Level::to_priority( 'WARN' ) ); }
+
   my $class = shift;
   my $params = validate(@_, $validationNew);
 
-  my $self = {};
+  my $self = Storable::dclone($params);
   bless($self, $class);
-  $self->{_params} = $params;
-  $self->setResultsDir( $params->{resultsDir} );
-  $self->setTestFiles( $params->{testFiles} );
+
+  $self->{testFilesByDir} = _sortFilesByDir($self->{testFiles});
+
+  loadJUnit() if $self->{junit};
+  loadCover() if $self->{cover};
+
   return $self;
 }
 
@@ -132,10 +154,10 @@ sub run {
 
 #  $self->changeWorkingDir();
   $self->prepareTestResultDirectories();
-  $self->clearCoverDb() if $self->isClover();
+  $self->clearCoverDb() if $self->{cover};
   $self->runharness();
-  $self->createCoverReport() if $self->isClover();
-  $self->tar() if $self->isTar();
+  $self->createCoverReport() if $self->{cover};
+  $self->tar() if $self->{tar};
 #  $self->revertWorkingDir();
 }
 
@@ -150,7 +172,7 @@ sub changeWorkingDir {
   my ($self) = @_;
 
   $self->{oldWorkingDir} = Cwd::getcwd();
-  chdir $self->{_params}->{resultsDir} || File::Basename::dirname($0);
+  chdir $self->{resultsDir} || File::Basename::dirname($0);
 }
 
 sub revertWorkingDir {
@@ -165,20 +187,20 @@ sub prepareTestResultDirectories {
   $self->getTestResultFileAndDirectoryPaths($self->{resultsDir});
   mkdir $self->{testResultsDir} unless -d $self->{testResultsDir};
   $self->_shell("rm", "-r $self->{junitDir}")  if -e $self->{junitDir};
-  $self->_shell("rm", "-r $self->{cloverDir}") if -e $self->{cloverDir};
+  $self->_shell("rm", "-r $self->{coverDir}") if -e $self->{coverDir};
   $self->_shell("rm", "-r $self->{dbDiffDir}")  if -e $self->{dbDiffDir};
   mkdir $self->{junitDir} unless -d $self->{junitDir};
-  mkdir $self->{cloverDir} unless -d $self->{cloverDir};
+  mkdir $self->{coverDir} unless -d $self->{coverDir};
   mkdir $self->{dbDiffDir} unless -d $self->{dbDiffDir};
   unlink $self->{testResultsArchive} if -e $self->{testResultsArchive};
 }
 
 =head2 getTestResultFileAndDirectoryPaths
-@STATIC
+ @STATIC
 
 Injects paths to the given HASHRef.
 
-Used to share all relevant paths centrally with no need to duplicate
+Centers the relevant path calculation logic so the paths can be accessed from external tests as well.
 
 =cut
 
@@ -187,7 +209,7 @@ sub getTestResultFileAndDirectoryPaths {
   $hash->{testResultsDir} = $resultsDir.'/testResults';
   $hash->{testResultsArchive} = 'testResults.tar.gz';
   $hash->{junitDir} =  $hash->{testResultsDir}.'/junit';
-  $hash->{cloverDir} = $hash->{testResultsDir}.'/clover';
+  $hash->{coverDir} = $hash->{testResultsDir}.'/cover';
   $hash->{cover_dbDir} = $hash->{testResultsDir}.'/cover_db';
   $hash->{dbDiffDir} = $hash->{testResultsDir}.'/dbDiff';
 }
@@ -205,13 +227,13 @@ sub clearCoverDb {
 
 =head2 createCoverReport
 
-Create Clover coverage reports
+Create Cover coverage reports
 
 =cut
 
 sub createCoverReport {
   my ($self) = @_;
-  $self->_shell('cover', "-report clover -outputdir $self->{cloverDir} $self->{cover_dbDir}");
+  $self->_shell('cover', "-report clover -report html -outputdir $self->{coverDir} $self->{cover_dbDir}");
 }
 
 =head2 tar
@@ -219,7 +241,7 @@ sub createCoverReport {
 Create a tar.gz-package out of test deliverables
 Package contains
 
-  testResults/clover/clover.xml
+  testResults/cover/clover.xml
   testResults/junit/*.xml
 
 =cut
@@ -230,8 +252,8 @@ sub tar {
 
   #Choose directories that need archiving
   my @archivable;
-  push(@archivable, $self->{junitDir}) if $self->isJunit;
-  push(@archivable, $self->{cloverDir}) if $self->isClover;
+  push(@archivable, $self->{junitDir}) if $self->{junit};
+  push(@archivable, $self->{coverDir}) if $self->{cover};
   my @dirs = map { my $a = $_; $a =~ s/\Q$baseDir\E\/?//; $a;} @archivable; #Change absolute path to relative
   my $cwd = Cwd::getcwd();
   chdir $baseDir;
@@ -247,16 +269,15 @@ Runs all given test files
 
 sub runharness {
   my ($self) = @_;
-  my $filesByDir = $self->{testFilesByDir};
 
-  if ($self->isDbDiff()) {
+  if ($self->{isDbDiff}) {
     $self->databaseDiff(); # Initialize first mysqldump before running any tests
   }
 
-  foreach my $dir (sort keys %$filesByDir) {
-    my @tests = sort @{$filesByDir->{$dir}};
+  foreach my $dir (sort keys %{$self->{testFilesByDir}}) {
+    my @tests = sort @{$self->{testFilesByDir}->{$dir}};
     unless (scalar(@tests)) {
-        carp "\@tests is empty?";
+        get_logger()->logdie("\@tests is empty?");
     }
     ##Prepare test harness params
     my $dirToPackage = $dir;
@@ -267,8 +288,8 @@ sub runharness {
         $EXECUTABLE_NAME,
         '-w',
     );
-    push(@exec, "-MDevel::Cover=-db,$self->{cover_dbDir},-silent,1,-coverage,all") if $self->isClover();
-    foreach my $lib (@{$self->lib}) {
+    push(@exec, "-MDevel::Cover=-db,$self->{cover_dbDir},-silent,1,-coverage,all") if $self->{cover};
+    foreach my $lib (@{$self->{lib}}) {
       push(@exec, "-I$lib");
     }
 
@@ -277,17 +298,17 @@ sub runharness {
     }
     else {
       my $harness;
-      if ($self->isJunit()) {
+      if ($self->{junit}) {
         $harness = TAP::Harness::JUnit->new({
             xmlfile => $xmlfile,
             package => "",
-            verbosity => $self->verbosity(),
+            verbosity => get_logger()->is_debug(),
             namemangle => 'perl',
             callbacks => {
               after_test => sub {
                 $self->databaseDiff({
                   test => shift->[0], parser => shift
-                }) if $self->isDbDiff();
+                }) if $self->{isDbDiff};
               },
             },
             exec       => \@exec,
@@ -296,12 +317,12 @@ sub runharness {
       }
       else {
         $harness = TAP::Harness->new({
-            verbosity => $self->verbosity(),
+            verbosity => get_logger()->is_debug(),
             callbacks => {
               after_test => sub {
                 $self->databaseDiff({
                   test => shift->[0], parser => shift
-                }) if $self->isDbDiff()
+                }) if $self->{isDbDiff}
               },
             },
             exec       => \@exec,
@@ -310,25 +331,6 @@ sub runharness {
       }
     }
   }
-}
-
-sub isClover {
-  return shift->{_params}->{clover};
-}
-sub isDbDiff {
-  return shift->{_params}->{dbDiff};
-}
-sub isJunit {
-  return shift->{_params}->{junit};
-}
-sub isTar {
-  return shift->{_params}->{tar};
-}
-sub verbosity {
-  return shift->{_params}->{verbose};
-}
-sub lib {
-  return shift->{_params}->{lib};
 }
 
 =head2 databaseDiff
@@ -343,12 +345,12 @@ sub databaseDiff {
 
     my $test   = $params->{test};
 
-    my $user = $self->{_params}->{dbUser};
-    my $pass = $self->{_params}->{dbPass};
-    my $host = $self->{_params}->{dbHost};
-    my $port = $self->{_params}->{dbPort};
-    my $db   = $self->{_params}->{dbDatabase};
-    my $sock = $self->{_params}->{dbSocket};
+    my $user = $self->{dbUser};
+    my $pass = $self->{dbPass};
+    my $host = $self->{dbHost};
+    my $port = $self->{dbPort};
+    my $db   = $self->{dbDatabase};
+    my $sock = $self->{dbSocket};
 
     unless (defined $user) {
         die 'KSTestHarness->databaseDiff(): Parameter dbUser undefined';
@@ -363,8 +365,8 @@ sub databaseDiff {
         die 'KSTestHarness->databaseDiff(): Parameter dbDatabase undefined';
     }
 
-    $self->{_params}->{tmpDbDiffDir} ||= '/tmp/KSTestHarness/dbDiff';
-    my $path = $self->{_params}->{tmpDbDiffDir};
+    $self->{tmpDbDiffDir} ||= '/tmp/KSTestHarness/dbDiff';
+    my $path = $self->{tmpDbDiffDir};
     unless (-e $path) {
         make_path($path);
     }
@@ -405,8 +407,8 @@ sub databaseDiff {
         $diff =~ s/(?!^.*INSERT INTO .*$)^.+//mg;
         $diff =~ s/^\n*//mg;
         @tables = $diff =~ /^INSERT INTO `(.*)`/mg; # Collect names of tables
-        if ($self->{_params}->{dbDiffIgnoreTables}) {
-          foreach my $table (@{$self->{_params}->{dbDiffIgnoreTables}}) {
+        if ($self->{dbDiffIgnoreTables}) {
+          foreach my $table (@{$self->{dbDiffIgnoreTables}}) {
             if (grep(/$table/, @tables)) {
               @tables = grep { $_ ne $table } @tables;
             }
@@ -419,9 +421,7 @@ sub databaseDiff {
                   "tables:\n". Data::Dumper::Dumper(@tables)
               );
             }
-            if ($self->verbosity) {
-                print "New inserts at tables:\n" . Data::Dumper::Dumper(@tables);
-            }
+            get_logger()->info("New inserts at tables:\n" . Data::Dumper::Dumper(@tables));
             my $filename = dirname($test);
             make_path("$self->{dbDiffDir}/$filename");
             open my $fh, '>>', "$self->{dbDiffDir}/$test.out";
@@ -435,24 +435,13 @@ sub databaseDiff {
     return @tables;
 }
 
-sub setResultsDir {
-  my ($self, $resultsDir) = @_;
-
-  $self->{resultsDir} = $self->{_params}->{resultsDir} || Cwd::getcwd();
-}
-
-sub setTestFiles {
-  my ($self, $testFiles) = validate_pos(@_, {isa => __PACKAGE__}, {callbacks => $validationTestFilesCallbacks});
-
-  $self->{testFilesByDir} = _sortFilesByDir($testFiles);
-}
 sub _sortFilesByDir {
     my ($files) = @_;
     unless (ref($files) eq 'ARRAY') {
-        carp "\$files is not an ARRAYRef";
+        get_config()->logdie("\$files is not an ARRAYRef");
     }
     unless (scalar(@$files)) {
-        carp "\$files is an ampty array?";
+        get_config()->logdie("\$files is an ampty array?");
     }
 
     #deduplicate files
@@ -531,12 +520,59 @@ sub _shell {
     my $coreDumpTriggered = ${^CHILD_ERROR_NATIVE} & 128;
     die "Shell command: $cmd\n  exited with code '$exitCode'. Killed by signal '$killSignal'.".(($coreDumpTriggered) ? ' Core dumped.' : '')."\nERROR MESSAGE: $error_message\nSTDOUT:\n@$stdout_buf\nSTDERR:\n@$stderr_buf\nCWD:".Cwd::getcwd()
         if $exitCode != 0;
-    print "CMD: $cmd\nERROR MESSAGE: ".($error_message // '')."\nSTDOUT:\n@$stdout_buf\nSTDERR:\n@$stderr_buf\nCWD:".Cwd::getcwd() if $self->verbosity() > 0;
+    get_logger->info("CMD: $cmd\nERROR MESSAGE: ".($error_message // '')."\nSTDOUT:\n@$stdout_buf\nSTDERR:\n@$stderr_buf\nCWD:".Cwd::getcwd());
     return "@$full_buf";
   }
 }
 
-1;
+=head2 parseOtherTests
+ @STATIC
 
+Parses the given blob of file names and paths invoked from god-knows what ways of shell-magic.
+Tries to normalize them into something the Test::Harness::* can understand.
+
+ @param1 ARRAYRef of Strings, which might or might not contain separated textual lists of filepaths.
+ @returns ARRAYRef of Strings, Normalized test file paths
+
+=cut
+
+sub parseOtherTests {
+    my ($files) = @_;
+    my @files = split(/(?:,|\s)+/, join(',', @$files));
+
+    my @warnings;
+    for (my $i=0 ; $i<@files ; $i++) {
+        my $f = $files[$i];
+        if ($f !~ /\.t\b/) {
+            push(@warnings, "File '$f' doesn't look like a Perl test file, as it doesn't have .t ending, ignoring it.") unless (-d $f);
+            $files[$i] = undef;
+        }
+    }
+    if (@warnings) {
+        get_logger->warn(join("\n", @warnings)) if @warnings;
+        @files = grep { defined $_ } @files;
+    }
+    return \@files;
+}
+
+=head2 findfiles
+ @STATIC
+
+Helper to the shell command 'find'
+
+ @param1 String, Dir to look from
+ @param2 String, selector used in the -name -parameter
+ @param3 Integer, -maxdepth, the depth of directories 'find' keeps looking into
+ @returns ARRAYRef of Strings, filepaths found
+
+=cut
+
+sub findFiles {
+    my ($dir, $selector, $maxDepth) = @_;
+    $maxDepth = 999 unless(defined($maxDepth));
+    my $files = `/usr/bin/find $dir -maxdepth $maxDepth -name '$selector'`;
+    my @files = split(/\n/, $files);
+    return \@files;
+}
 
 1;
