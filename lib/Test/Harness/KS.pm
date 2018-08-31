@@ -4,19 +4,26 @@ package Test::Harness::KS;
 # Copyright 2018 National Library of Finland
 # Copyright 2017 KohaSuomi
 
-=NAME
+=head1 NAME
 
 Test::Harness::KS
 
-=SYNOPSIS
+=head1 SYNOPSIS
 
 Runs given test files and generates clover, html and junit test reports to the given directory.
 
 Automatically sorts given test files by directory and deduplicates them.
 
 See
-  test-harness-ks --help
+
+ test-harness-ks --help
+
 for commandline usage
+
+=head1 USAGE
+
+  my $harness = Test::Harness->new($params);
+  $harness->run();
 
 =cut
 
@@ -30,10 +37,10 @@ use Scalar::Util qw(blessed);
 use Cwd;
 
 ##Testing harness libraries
-sub loadJUnit() {
+sub _loadJUnit() {
   require TAP::Harness::JUnit;
 }
-sub loadCover() {
+sub _loadCover() {
   require Devel::Cover; #Require coverage testing and extensions for it. These are not actually used in this package directly, but Dist::Zilla uses this data to autogenerate the dependencies
   require Devel::Cover::Report::Clover;
   require Template;
@@ -143,46 +150,47 @@ sub new {
 
   $self->{testFilesByDir} = _sortFilesByDir($self->{testFiles});
 
-  loadJUnit() if $self->{junit};
-  loadCover() if $self->{cover};
+  _loadJUnit() if $self->{junit};
+  _loadCover() if $self->{cover};
 
   return $self;
 }
 
-sub run {
-  my ($self) = @_;
+=head2 run
 
-#  $self->changeWorkingDir();
-  $self->prepareTestResultDirectories();
-  $self->clearCoverDb() if $self->{cover};
-  $self->runharness();
-  $self->createCoverReport() if $self->{cover};
-  $self->tar() if $self->{tar};
-#  $self->revertWorkingDir();
-}
+  $harness->run();
 
-=head2 changeWorkingDir
-
-Change to the given --results-dir
-or to the directory of the calling script.
+Executes the configured test harness.
 
 =cut
 
-sub changeWorkingDir {
+sub run {
+  my ($self) = @_;
+
+#  $self->_changeWorkingDir();
+  $self->_prepareTestResultDirectories();
+  $self->clearCoverDb() if $self->{cover};
+  $self->_runharness();
+  $self->createCoverReport() if $self->{cover};
+  $self->tar() if $self->{tar};
+#  $self->_revertWorkingDir();
+}
+
+sub _changeWorkingDir {
   my ($self) = @_;
 
   $self->{oldWorkingDir} = Cwd::getcwd();
   chdir $self->{resultsDir} || File::Basename::dirname($0);
 }
 
-sub revertWorkingDir {
+sub _revertWorkingDir {
   my ($self) = @_;
 
   die "\$self->{oldWorkingDir} is not known when reverting to the old working directory?? This should never happen!!" unless $self->{oldWorkingDir};
   chdir $self->{oldWorkingDir};
 }
 
-sub prepareTestResultDirectories {
+sub _prepareTestResultDirectories {
   my ($self) = @_;
   $self->getTestResultFileAndDirectoryPaths($self->{resultsDir});
   mkdir $self->{testResultsDir} unless -d $self->{testResultsDir};
@@ -193,25 +201,6 @@ sub prepareTestResultDirectories {
   mkdir $self->{coverDir} unless -d $self->{coverDir};
   mkdir $self->{dbDiffDir} unless -d $self->{dbDiffDir};
   unlink $self->{testResultsArchive} if -e $self->{testResultsArchive};
-}
-
-=head2 getTestResultFileAndDirectoryPaths
- @STATIC
-
-Injects paths to the given HASHRef.
-
-Centers the relevant path calculation logic so the paths can be accessed from external tests as well.
-
-=cut
-
-sub getTestResultFileAndDirectoryPaths {
-  my ($hash, $resultsDir) = @_;
-  $hash->{testResultsDir} = $resultsDir.'/testResults';
-  $hash->{testResultsArchive} = 'testResults.tar.gz';
-  $hash->{junitDir} =  $hash->{testResultsDir}.'/junit';
-  $hash->{coverDir} = $hash->{testResultsDir}.'/cover';
-  $hash->{cover_dbDir} = $hash->{testResultsDir}.'/cover_db';
-  $hash->{dbDiffDir} = $hash->{testResultsDir}.'/dbDiff';
 }
 
 =head2 clearCoverDb
@@ -239,9 +228,12 @@ sub createCoverReport {
 =head2 tar
 
 Create a tar.gz-package out of test deliverables
+
 Package contains
 
   testResults/cover/clover.xml
+  testResults/cover/coverage.html
+  testResults/cover/*
   testResults/junit/*.xml
 
 =cut
@@ -261,13 +253,10 @@ sub tar {
   chdir $cwd;
 }
 
-=head2 runharness
-
-Runs all given test files
-
-=cut
-
-sub runharness {
+#
+# Runs all given test files
+#
+sub _runharness {
   my ($self) = @_;
 
   if ($self->{isDbDiff}) {
@@ -458,16 +447,13 @@ sub _sortFilesByDir {
     return \%dirsWithFiles;
 }
 
-=head2 _add_failed_test_dynamically
-
-Dynamically generates a failed test and pushes the result to the end of
-TAP::Parser::Result->{__results} for JUnit.
-
-C<$parser> is an instance of TAP::Harness::JUnit::Parser
-C<$desc> is a custom description for the test
-
-=cut
-
+#
+# Dynamically generates a failed test and pushes the result to the end of
+# TAP::Parser::Result->{__results} for JUnit.
+#
+# C<$parser> is an instance of TAP::Harness::JUnit::Parser
+# C<$desc> is a custom description for the test
+#
 sub _add_failed_test_dynamically {
   my ($self, $parser, $desc) = @_;
 
@@ -525,8 +511,27 @@ sub _shell {
   }
 }
 
+=head2 getTestResultFileAndDirectoryPaths
+ @static
+
+Injects paths to the given HASHRef.
+
+Centers the relevant path calculation logic so the paths can be accessed from external tests as well.
+
+=cut
+
+sub getTestResultFileAndDirectoryPaths {
+  my ($hash, $resultsDir) = @_;
+  $hash->{testResultsDir} = $resultsDir.'/testResults';
+  $hash->{testResultsArchive} = 'testResults.tar.gz';
+  $hash->{junitDir} =  $hash->{testResultsDir}.'/junit';
+  $hash->{coverDir} = $hash->{testResultsDir}.'/cover';
+  $hash->{cover_dbDir} = $hash->{testResultsDir}.'/cover_db';
+  $hash->{dbDiffDir} = $hash->{testResultsDir}.'/dbDiff';
+}
+
 =head2 parseOtherTests
- @STATIC
+ @static
 
 Parses the given blob of file names and paths invoked from god-knows what ways of shell-magic.
 Tries to normalize them into something the Test::Harness::* can understand.
@@ -556,7 +561,7 @@ sub parseOtherTests {
 }
 
 =head2 findfiles
- @STATIC
+ @static
 
 Helper to the shell command 'find'
 
