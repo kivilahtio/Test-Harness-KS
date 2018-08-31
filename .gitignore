@@ -6,6 +6,8 @@
 *.o
 *.pm.tdy
 *.bs
+*.swp
+.vstags
 
 # Devel::Cover
 cover_db/
@@ -33,3 +35,6 @@ inc/
 /MANIFEST.bak
 /pm_to_blib
 /*.zip
+
+#Release sources
+Test-Harness-KS-*
