@@ -6,7 +6,7 @@ package Test::Harness::KS;
 
 =head1 NAME
 
-Test::Harness::KS
+Test::Harness::KS - Harness the power of clover and junit in one easy to use wrapper.
 
 =head1 SYNOPSIS
 
